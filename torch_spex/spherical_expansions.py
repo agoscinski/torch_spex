@@ -4,8 +4,8 @@ import numpy as np
 import torch
 import ase
 from ase.neighborlist import primitive_neighbor_list
-import equistore
-from equistore import TensorMap, Labels, TensorBlock
+import equistore.operations
+from equistore.torch import TensorMap, Labels, TensorBlock
 
 from .angular_basis import AngularBasis
 from .radial_basis import RadialBasis
@@ -75,14 +75,14 @@ class SphericalExpansion(torch.nn.Module):
         super().__init__()
 
         self.hypers = hypers
-        self.all_species = np.array(all_species, dtype=np.int32)  # convert potential list to np.array
+        self.all_species = all_species
         self.vector_expansion_calculator = VectorExpansion(hypers, device=device)
 
         if "alchemical" in self.hypers:
             self.is_alchemical = True
             self.all_species_labels = Labels(
                 names = ["species_neighbor"],
-                values = self.all_species[:, None]
+                values = torch.tensor(self.all_species[:, None], dtype=torch.int32)
             )
             self.n_pseudo_species = self.hypers["alchemical"]
             self.combination_matrix = torch.nn.Linear(self.all_species.shape[0], self.n_pseudo_species, bias=False)
@@ -92,17 +92,32 @@ class SphericalExpansion(torch.nn.Module):
     def forward(self, structures: Dict[str, torch.Tensor]):
 
         expanded_vectors = self.vector_expansion_calculator(structures)
-        samples_metadata = expanded_vectors.block(l=0).samples
+        #samples_metadata = expanded_vectors.block(l=0)
+        # error message
+        #RuntimeError: block() is missing value for argument 'selection'. Declaration: block(__torch__.torch.classes.equistore.TensorMap _0, Any selection) -> __torch__.torch.classes.equistore.TensorBlock _0
 
-        s_metadata = samples_metadata["structure"]
-        i_metadata = samples_metadata["center"]
-        ai_metadata = samples_metadata["species_center"]
+        l0_labels = Labels(names=["l"], values=torch.tensor([(0,)]))
+        samples_metadata = expanded_vectors.block(l0_labels).samples
+        # does not work because it is a ScriptObject
+
+        # TMP hack needs to be changed before merge
+        #samples_metadata = expanded_vectors.block(0)
+
+        s_metadata = samples_metadata["structure"].values.flatten()
+        i_metadata = samples_metadata["center"].values.flatten()
+        ai_metadata = samples_metadata["species_center"].values.flatten()
 
         n_species = len(self.all_species)
         species_to_index = {atomic_number : i_species for i_species, atomic_number in enumerate(self.all_species)}
 
-        s_i_metadata = np.stack([s_metadata, i_metadata], axis=-1)
-        unique_s_i_indices, s_i_unique_to_metadata, s_i_metadata_to_unique = np.unique(s_i_metadata, axis=0, return_index=True, return_inverse=True)
+        s_i_metadata = torch.stack([s_metadata, i_metadata], axis=-1)
+        # because torch.unique does now support return_index option
+        #unique_s_i_indices, s_i_unique_to_metadata, s_i_metadata_to_unique = np.unique(s_i_metadata, dim=0)
+        unique_s_i_indices, s_i_unique_to_metadata, s_i_metadata_to_unique = np.unique(s_i_metadata.numpy(), return_index=True, return_inverse=True, axis=0)
+        # COMMENT: why these are int64 and later LongTensors?
+        unique_s_i_indices = torch.tensor(unique_s_i_indices, dtype=torch.int64)
+        s_i_unique_to_metadata = torch.tensor(s_i_unique_to_metadata, dtype=torch.int64)
+        s_i_metadata_to_unique = torch.tensor(s_i_metadata_to_unique, dtype=torch.int64)
 
         l_max = self.vector_expansion_calculator.l_max
         n_centers = len(unique_s_i_indices)
@@ -110,16 +125,18 @@ class SphericalExpansion(torch.nn.Module):
         densities = []
         if self.is_alchemical:
 
+            l0_labels = Labels(names=["l"], values=torch.tensor([(0,)]))
             one_hot_aj = torch.tensor(
-                equistore.one_hot(samples_metadata, self.all_species_labels),
+                one_hot(samples_metadata, self.all_species_labels),
                 dtype = torch.get_default_dtype(),
-                device = expanded_vectors.block(l=0).values.device
+                device = expanded_vectors.block(l0_labels).values.device
             )
             pseudo_species_weights = self.combination_matrix(one_hot_aj)
 
             density_indices = torch.LongTensor(s_i_metadata_to_unique)
             for l in range(l_max+1):
-                expanded_vectors_l = expanded_vectors.block(l=l).values
+                l_labels = Labels(names=["l"], values=torch.tensor([(l,)]))
+                expanded_vectors_l = expanded_vectors.block(l_labels ).values
                 expanded_vectors_l_pseudo = torch.einsum(
                     "abc, ad -> abcd", expanded_vectors_l, pseudo_species_weights
                 )
@@ -131,14 +148,15 @@ class SphericalExpansion(torch.nn.Module):
                 densities_l.index_add_(dim=0, index=density_indices.to(expanded_vectors_l.device), source=expanded_vectors_l_pseudo)
                 densities_l = densities_l.reshape((n_centers, 2*l+1, -1, self.n_pseudo_species)).swapaxes(2, 3).reshape((n_centers, 2*l+1, -1))
                 densities.append(densities_l)
-            species = -np.arange(self.n_pseudo_species)
+            species = -torch.arange(self.n_pseudo_species)
         else:
-            aj_metadata = samples_metadata["species_neighbor"]
-            aj_shifts = np.array([species_to_index[aj_index] for aj_index in aj_metadata])
+            aj_metadata = samples_metadata.values[:, samples_metadata.names.index("species_neighbor")]
+            aj_shifts = torch.tensor([species_to_index[int(aj_index)] for aj_index in aj_metadata])
             density_indices = torch.LongTensor(s_i_metadata_to_unique*n_species+aj_shifts)
 
             for l in range(l_max+1):
-                expanded_vectors_l = expanded_vectors.block(l=l).values
+                l_labels = Labels(names=["l"], values=torch.tensor([(l,)]))
+                expanded_vectors_l = expanded_vectors.block(l_labels).values
                 densities_l = torch.zeros(
                     (n_centers*n_species, expanded_vectors_l.shape[1], expanded_vectors_l.shape[2]),
                     dtype = expanded_vectors_l.dtype,
@@ -147,7 +165,7 @@ class SphericalExpansion(torch.nn.Module):
                 densities_l.index_add_(dim=0, index=density_indices.to(expanded_vectors_l.device), source=expanded_vectors_l)
                 densities_l = densities_l.reshape((n_centers, n_species, 2*l+1, -1)).swapaxes(1, 2).reshape((n_centers, 2*l+1, -1))
                 densities.append(densities_l)
-            species = self.all_species
+            species = torch.tensor(self.all_species, dtype=torch.int32)
 
         # constructs the TensorMap object
         ai_new_indices = torch.tensor(ai_metadata[s_i_unique_to_metadata])
@@ -155,11 +173,14 @@ class SphericalExpansion(torch.nn.Module):
         blocks = []
         for l in range(l_max+1):
             densities_l = densities[l]
-            vectors_l_block = expanded_vectors.block(l=l)
+            l_labels = Labels(names=["l"], values=torch.tensor([(l,)]))
+            vectors_l_block = expanded_vectors.block(l_labels )
             vectors_l_block_components = vectors_l_block.components
-            vectors_l_block_n = vectors_l_block.properties["n"]
+            vectors_l_block_n = vectors_l_block.properties["n"].values.flatten()
+
+            samples_metadata.values[:, samples_metadata.names.index("species_center")]
             for a_i in self.all_species:
-                where_ai = torch.LongTensor(np.where(ai_new_indices == a_i)[0]).to(densities_l.device)
+                where_ai = torch.LongTensor(torch.where(ai_new_indices == a_i)[0]).to(densities_l.device)
                 densities_ai_l = torch.index_select(densities_l, 0, where_ai)
                 labels.append([a_i, l, 1])
                 blocks.append(
@@ -167,16 +188,16 @@ class SphericalExpansion(torch.nn.Module):
                         values = densities_ai_l,
                         samples = Labels(
                             names = ["structure", "center"],
-                            values = unique_s_i_indices[where_ai.cpu().numpy()]
+                            values = unique_s_i_indices[where_ai.cpu()]
                         ),
                         components = vectors_l_block_components,
                         properties = Labels(
                             names = ["a1", "n1", "l1"],
-                            values = np.stack(
+                            values = torch.stack(
                                 [
-                                    np.repeat(species, vectors_l_block_n.shape[0]),
-                                    np.tile(vectors_l_block_n, species.shape[0]),
-                                    l*np.ones((densities_ai_l.shape[2],), dtype=np.int32)
+                                    species.repeat(vectors_l_block_n.shape[0]),
+                                    torch.tile(vectors_l_block_n, (species.shape[0],)),
+                                    l*torch.ones((densities_ai_l.shape[2],), dtype=torch.int32)
                                 ],
                                 axis=1
                             )
@@ -187,7 +208,7 @@ class SphericalExpansion(torch.nn.Module):
         spherical_expansion = TensorMap(
             keys = Labels(
                 names = ["a_i", "lam", "sigma"],
-                values = np.array(labels, dtype=np.int32)
+                values = torch.tensor(labels, dtype=torch.int32)
             ),
             blocks = blocks
         )
@@ -259,11 +280,11 @@ class VectorExpansion(torch.nn.Module):
                     samples = cartesian_vectors.samples,
                     components = [Labels(
                         names = ("m",),
-                        values = np.arange(-l, l+1, dtype=np.int32).reshape(2*l+1, 1)
+                        values = torch.arange(-l, l+1, dtype=torch.int32).reshape(2*l+1, 1)
                     )],
                     properties = Labels(
                         names = ("n",),
-                        values = np.arange(0, n_max_l, dtype=np.int32).reshape(n_max_l, 1)
+                        values = torch.arange(0, n_max_l, dtype=torch.int32).reshape(n_max_l, 1)
                     )
                 )
             )
@@ -272,7 +293,7 @@ class VectorExpansion(torch.nn.Module):
         vector_expansion_tmap = TensorMap(
             keys = Labels(
                 names = ("l",),
-                values = np.arange(0, l_max+1, dtype=np.int32).reshape(l_max+1, 1),
+                values = torch.arange(0, l_max+1, dtype=torch.int32).reshape(l_max+1, 1),
             ),
             blocks = vector_expansion_blocks
         )
@@ -320,12 +341,12 @@ def get_cartesian_vectors(structures: Dict[str, torch.Tensor], cutoff_radius: fl
         values = vectors.unsqueeze(dim=-1),
         samples = Labels(
             names = ["structure", "center", "neighbor", "species_center", "species_neighbor", "cell_x", "cell_y", "cell_z"],
-            values = np.array(labels, dtype=np.int32)
+            values = torch.tensor(labels, dtype=torch.int32)
         ),
         components = [
             Labels(
                 names = ["cartesian_dimension"],
-                values = np.array([-1, 0, 1], dtype=np.int32).reshape((-1, 1))
+                values = torch.tensor([-1, 0, 1], dtype=torch.int32).reshape((-1, 1))
             )
         ],
         properties = Labels.single()
@@ -358,3 +379,57 @@ def get_neighbor_list(positions, pbc, cell, cutoff_radius):
     unit_cell_shift_vectors = torch.tensor(unit_cell_shift_vectors, dtype=torch.get_default_dtype())
 
     return centers, neighbors, unit_cell_shift_vectors
+
+def torch_unique(x, dim=None):
+    """Unique elements of x and indices of those unique elements
+    https://github.com/pytorch/pytorch/issues/36748#issuecomment-619514810
+
+    imitategs return_index=True, return_inverse=True from numpy
+    e.g.
+
+    unique(tensor([
+        [1, 2, 3],
+        [1, 2, 4],
+        [1, 2, 3],
+        [1, 2, 5]
+    ]), dim=0)
+    => (tensor([[1, 2, 3],
+                [1, 2, 4],
+                [1, 2, 5]]),
+        tensor([0, 1, 3]))
+        tensor ... inverse
+    """
+    unique, inverse = torch.unique(
+        x, sorted=True, return_inverse=True, dim=dim)
+    perm = torch.arange(inverse.size(0), dtype=inverse.dtype,
+                        device=inverse.device)
+    inverse, perm = inverse.flip([0]), perm.flip([0])
+    return unique, inverse.new_empty(unique.size(0)).scatter_(0, inverse, perm), inverse
+
+def one_hot(labels: Labels, dimension: Labels):
+
+    if len(dimension.names) != 1:
+        raise ValueError(
+            "only one label dimension can be extracted as one-hot "
+            "encoding. The `dimension` labels contains "
+            f"{len(dimension.names)} names"
+        )
+
+    name = dimension.names[0]
+    possible_labels = dimension[name].values.flatten()
+    try:
+        original_labels = labels[name].values
+    except ValueError:
+        raise ValueError("the dimension provided was not found among the labels")
+
+    indices = torch.where(
+        original_labels.reshape(-1, 1) == possible_labels
+    )[1]
+
+    if indices.shape[0] != labels.values.shape[0]:
+        raise ValueError(
+            "some values not present in the dimension were found in the labels"
+        )
+    one_hot_array = torch.eye(possible_labels.shape[0])[indices]
+
+    return one_hot_array
