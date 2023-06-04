@@ -25,7 +25,7 @@ setup(
         'ase',
         'torch',
         'scipy',
-        'equistore-operations@git+https://github.com/Luthaf/equistore.git@torch-core-classes\#subdirectory=python/equistore-operations',
+        'equistore-operations@git+https://github.com/Luthaf/equistore.git@torch-core-classes#subdirectory=python/equistore-operations',
         'equistore-torch@git+https://github.com/Luthaf/equistore.git@torch-core-classes#subdirectory=python/equistore-torch',
     ],
     dependency_links = dependency_links
