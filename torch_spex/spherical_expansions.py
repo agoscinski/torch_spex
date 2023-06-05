@@ -1,7 +1,6 @@
 import copy
 from torch_nl import compute_neighborlist
 
-import numpy as np
 import torch
 import ase
 from ase.neighborlist import primitive_neighbor_list
@@ -50,7 +49,6 @@ class SphericalExpansion(torch.nn.Module):
         The Journal of Chemical Physics 157.23 (2022): 234101.
         https://doi.org/10.1063/5.0124363
 
-    >>> import numpy as np
     >>> from ase.build import molecule
     >>> from torch_spex.structures import ase_atoms_to_tensordict
     >>> from torch_spex.spherical_expansions import SphericalExpansion
@@ -64,12 +62,12 @@ class SphericalExpansion(torch.nn.Module):
     >>> h2o = molecule("H2O")
     >>> spherical_expansion = SphericalExpansion(hypers, [1,8], device="cpu")
     >>> atomic_structures = ase_atoms_to_tensordict([h2o])
-    >>> spherical_expansion.forward(atomic_structures)
+    >>> print(spherical_expansion.forward(atomic_structures))
     TensorMap with 2 blocks
-    keys: ['a_i' 'lam' 'sigma']
-             1     0      1
-             8     0      1
-
+    keys: a_i  lam  sigma
+           1    0     1
+           8    0     1
+    <BLANKLINE>
     """
 
     def __init__(self, hypers: Dict, all_species: List[int], device: str ="cpu") -> None:
