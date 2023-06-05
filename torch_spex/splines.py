@@ -59,7 +59,7 @@ def generate_splines(
     return dynamic_spliner
 
 
-class DynamicSpliner:
+class DynamicSpliner(torch.nn.Module):
 
     def __init__(
         self,
@@ -71,6 +71,7 @@ class DynamicSpliner:
         device
     ) -> None:
 
+        super().__init__()
         self.start = start
         self.stop = stop
         self.values_fn = values_fn

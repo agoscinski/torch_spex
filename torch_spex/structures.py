@@ -32,10 +32,10 @@ def ase_atoms_to_tensordict(atoms_list : List[ase.Atoms]) -> Dict[str, torch.Ten
         pbcs.append(atoms.pbc)
 
     atomic_structures = {}
-    atomic_structures["n_structures"] = torch.tensor(len(atoms_list))
+    atomic_structures["n_structures"] = torch.tensor(len(atoms_list)) # int32 or in64?
     atomic_structures["positions"] = torch.tensor(np.concatenate(positions, axis=0), dtype=torch.get_default_dtype())
-    atomic_structures["cells"] = torch.tensor(cells)
-    atomic_structures["structure_indices"] = torch.tensor(structure_indices)
-    atomic_structures["atomic_species"] = torch.tensor(atomic_species)
-    atomic_structures["pbcs"] = torch.tensor(pbcs)
+    atomic_structures["cells"] = torch.tensor(cells, dtype=torch.get_default_dtype())
+    atomic_structures["structure_indices"] = torch.tensor(structure_indices) # int32 or in64?
+    atomic_structures["atomic_species"] = torch.tensor(atomic_species) # int32 or in64?
+    atomic_structures["pbcs"] = torch.tensor(pbcs) # int32 or in64?
     return atomic_structures

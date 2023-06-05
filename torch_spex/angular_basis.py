@@ -13,5 +13,5 @@ class AngularBasis(torch.nn.Module):
 
     def forward(self, xyz):
         sh = self.sh_calculator.compute(xyz)
-        sh = [sh[:, l**2:(l+1)**2] for l in range(self.l_max+1)]
+        sh = [sh[:, int(l**2):int((l+1)**2)] for l in range(self.l_max+1)]
         return sh
