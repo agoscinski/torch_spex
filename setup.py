@@ -26,6 +26,7 @@ setup(
         'torch',
         'scipy',
         'equistore-torch@git+https://github.com/Luthaf/equistore.git@torch-core-classes#subdirectory=python/equistore-torch',
+        'torch_nl'
     ],
     dependency_links = dependency_links
 )
