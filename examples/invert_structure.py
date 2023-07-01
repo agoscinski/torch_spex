@@ -21,15 +21,16 @@ import torch
 import numpy as np
 import ase.io
 
-from torch_spex.structures import ase_atoms_to_tensordict
+from torch_spex.structures import ase_atoms_to_tensordict_nl
 from torch_spex.spherical_expansions import SphericalExpansion
 hypers = {
-    "cutoff radius": 6,
+    "cutoff radius": 3,
     "radial basis": {
-        "E_max": 300
+        "E_max": 20
     },
 }
-spherical_expansion = SphericalExpansion(hypers, [1,6], device="cpu")
+torch.set_default_device('cpu')
+spherical_expansion = SphericalExpansion(hypers, [1,6])
 
 
 frame = ase.io.read('inversion_fails.extxyz', 0)
@@ -37,9 +38,21 @@ frame_shifted = ase.io.read('inversion_fails.extxyz', 1)
 frame = ase.io.read('../datasets/random-ch4-10k.extxyz', '0')
 frame_shifted = frame.copy()
 frame_shifted.positions += np.random.normal(scale=0.1, size=frame_shifted.positions.shape)
+atomic_structures = ase_atoms_to_tensordict_nl([frame], hypers["cutoff radius"])
+atomic_structures_shifted = ase_atoms_to_tensordict_nl([frame_shifted], hypers["cutoff radius"])
+for key in atomic_structures.keys():
+    if not(isinstance(atomic_structures[key], torch.Tensor)):
+        atomic_structures[key].values.to('cuda:0')
+    else:
+        atomic_structures[key].to('cuda:0')
 
-atomic_structures = ase_atoms_to_tensordict([frame])
-atomic_structures_shifted = ase_atoms_to_tensordict([frame_shifted])
+for key in atomic_structures_shifted.keys():
+    if not(isinstance(atomic_structures[key], torch.Tensor)):
+        atomic_structures_shifted [key].values.to('cuda:0')
+    else:
+        atomic_structures_shifted [key].to('cuda:0')
+
+torch.set_default_device('cuda:0')
 with torch.no_grad():
     ref = spherical_expansion.forward(atomic_structures)
 

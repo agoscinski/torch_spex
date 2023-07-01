@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import ase
 from ase.neighborlist import primitive_neighbor_list
+from .structures import get_cartesian_vectors
 import equistore
 from equistore import TensorMap, Labels, TensorBlock
 import sphericart.torch
@@ -70,7 +71,7 @@ class SphericalExpansion(torch.nn.Module):
 
     """
 
-    def __init__(self, hypers: Dict, all_species: List[int], device: str ="cpu") -> None:
+    def __init__(self, hypers: Dict, all_species: List[int], device: str = None) -> None:
         super().__init__()
 
         self.hypers = hypers
@@ -158,9 +159,9 @@ class SphericalExpansion(torch.nn.Module):
             densities_l = densities[l]
             vectors_l_block = expanded_vectors.block(l=l)
             vectors_l_block_components = vectors_l_block.components
-            vectors_l_block_n = vectors_l_block.properties["n"].values[:, 0]
+            vectors_l_block_n = torch.tensor(vectors_l_block.properties["n"].values[:, 0])
             for a_i in self.all_species:
-                where_ai = torch.LongTensor(np.where(ai_new_indices == a_i)[0]).to(densities_l.device)
+                where_ai = torch.where(ai_new_indices == a_i)[0].to(densities_l.device)
                 densities_ai_l = torch.index_select(densities_l, 0, where_ai)
                 labels.append([a_i, l, 1])
                 blocks.append(
@@ -173,13 +174,13 @@ class SphericalExpansion(torch.nn.Module):
                         components = vectors_l_block_components,
                         properties = Labels(
                             names = ["a1", "n1", "l1"],
-                            values = np.stack(
+                            values = torch.stack(
                                 [
-                                    np.repeat(species, vectors_l_block_n.shape[0]),
-                                    np.tile(vectors_l_block_n, species.shape[0]),
-                                    l*np.ones((densities_ai_l.shape[2],), dtype=np.int32)
+                                  species.repeat(vectors_l_block_n.shape[0]),
+                                  torch.tile(vectors_l_block_n, (species.shape[0],)),
+                                  l*torch.ones((densities_ai_l.shape[2],), dtype=torch.int32)
                                 ],
-                                axis=1
+                                dim=1
                             )
                         )
                     )
@@ -223,7 +224,7 @@ class VectorExpansion(torch.nn.Module):
 
     """
 
-    def __init__(self, hypers: Dict, device: str ="cpu") -> None:
+    def __init__(self, hypers: Dict, device: str = None) -> None:
         super().__init__()
 
         self.hypers = hypers
@@ -237,8 +238,11 @@ class VectorExpansion(torch.nn.Module):
 
     def forward(self, structures: Dict[str, torch.Tensor]):
 
-        cutoff_radius = self.hypers["cutoff radius"]
-        cartesian_vectors = get_cartesian_vectors(structures, cutoff_radius)
+        if "cartesian_vectors" in structures.keys():
+            cartesian_vectors = structures["cartesian_vectors"]
+        else:
+            cutoff_radius = self.hypers["cutoff radius"]
+            cartesian_vectors = get_cartesian_vectors(structures, cutoff_radius)
 
         bare_cartesian_vectors = cartesian_vectors.values.squeeze(dim=-1)
 
@@ -282,83 +286,3 @@ class VectorExpansion(torch.nn.Module):
 
         return vector_expansion_tmap
 
-
-def get_cartesian_vectors(structures: Dict[str, torch.Tensor], cutoff_radius: float):
-
-    labels = []
-    vectors = []
-
-    for structure_index in range(structures["n_structures"]):
-
-        where_selected_structure = np.where(structures["structure_indices"] == structure_index)[0]
-
-        centers, neighbors, unit_cell_shift_vectors = get_neighbor_list(
-            structures["positions"].detach().cpu().numpy()[where_selected_structure], 
-            structures["pbcs"][structure_index], 
-            structures["cells"][structure_index], 
-            cutoff_radius) 
-        
-        atoms_idx = torch.LongTensor(where_selected_structure)
-        positions = structures["positions"][atoms_idx]
-        cell = torch.tensor(np.array(structures["cells"][structure_index]), dtype=torch.get_default_dtype())
-        species = structures["atomic_species"][atoms_idx]
-
-        structure_vectors = positions[neighbors] - positions[centers] + (unit_cell_shift_vectors @ cell).to(positions.device)  # Warning: it works but in a weird way when there is no cell
-        vectors.append(structure_vectors)
-        labels.append(
-            np.stack([
-                np.array([structure_index]*len(centers)), 
-                centers.numpy(), 
-                neighbors.numpy(), 
-                species[centers], 
-                species[neighbors],
-                unit_cell_shift_vectors[:, 0],
-                unit_cell_shift_vectors[:, 1],
-                unit_cell_shift_vectors[:, 2]
-            ], axis=-1))
-
-    vectors = torch.cat(vectors, dim=0)
-    labels = np.concatenate(labels, axis=0)
-    
-    block = TensorBlock(
-        values = vectors.unsqueeze(dim=-1),
-        samples = Labels(
-            names = ["structure", "center", "neighbor", "species_center", "species_neighbor", "cell_x", "cell_y", "cell_z"],
-            values = np.array(labels, dtype=np.int32)
-        ),
-        components = [
-            Labels(
-                names = ["cartesian_dimension"],
-                values = np.array([-1, 0, 1], dtype=np.int32).reshape((-1, 1))
-            )
-        ],
-        properties = Labels.single()
-    )
-
-    return block 
-
-
-def get_neighbor_list(positions, pbc, cell, cutoff_radius):
-
-    centers, neighbors, unit_cell_shift_vectors = ase.neighborlist.primitive_neighbor_list(
-        quantities="ijS",
-        pbc=pbc,
-        cell=cell,
-        positions=positions,
-        cutoff=cutoff_radius,
-        self_interaction=True,
-        use_scaled_positions=False,
-    )
-
-    pairs_to_throw = np.logical_and(centers == neighbors, np.all(unit_cell_shift_vectors == 0, axis=1))
-    pairs_to_keep = np.logical_not(pairs_to_throw)
-
-    centers = centers[pairs_to_keep]
-    neighbors = neighbors[pairs_to_keep]
-    unit_cell_shift_vectors = unit_cell_shift_vectors[pairs_to_keep]
-
-    centers = torch.LongTensor(centers)
-    neighbors = torch.LongTensor(neighbors)
-    unit_cell_shift_vectors = torch.tensor(unit_cell_shift_vectors, dtype=torch.get_default_dtype())
-
-    return centers, neighbors, unit_cell_shift_vectors
