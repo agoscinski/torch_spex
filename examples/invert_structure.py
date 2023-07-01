@@ -38,6 +38,7 @@ frame_shifted = ase.io.read('inversion_fails.extxyz', 1)
 frame = ase.io.read('../datasets/random-ch4-10k.extxyz', '0')
 frame_shifted = frame.copy()
 frame_shifted.positions += np.random.normal(scale=0.1, size=frame_shifted.positions.shape)
+
 atomic_structures = ase_atoms_to_tensordict_nl([frame], hypers["cutoff radius"])
 atomic_structures_shifted = ase_atoms_to_tensordict_nl([frame_shifted], hypers["cutoff radius"])
 for key in atomic_structures.keys():
