@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from dataset import get_dataset_slices
 from torch_spex.forces import compute_forces
-from torch_spex.structures import Structures
+from torch_spex.structures import ase_atoms_to_tensordict
 from torch_spex.spherical_expansions import SphericalExpansion
 from power_spectrum import PowerSpectrum
 
@@ -41,12 +41,13 @@ target_key = "energy"
 dataset_path = "../datasets/alchemical.xyz"
 do_forces = True
 force_weight = 1.0
-n_test = 100
-n_train = 1000
-r_cut = 4.0
+n_test = 1000
+n_train = 10000
+r_cut = 5.0
 optimizer_name = "Adam"
 
 np.random.seed(random_seed)
+torch.manual_seed(random_seed)
 print(f"Random seed: {random_seed}")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -72,7 +73,7 @@ hypers = {
     "cutoff radius": r_cut,
     "radial basis": {
         "r_cut": r_cut,
-        "E_max": 200
+        "E_max": 300
     }
 }
 
@@ -112,12 +113,11 @@ class Model(torch.nn.Module):
     def forward(self, structures, is_training=True):
 
         # print("Transforming structures")
-        structures = Structures(structures)
-        structures.to(device)
-        energies = torch.zeros((structures.n_structures,), device=device, dtype=torch.get_default_dtype())
+        structures = ase_atoms_to_tensordict(structures, device=device)
+        energies = torch.zeros((structures["n_structures"].item(),), device=device, dtype=torch.get_default_dtype())
 
         if self.do_forces:
-            structures.positions.requires_grad = True
+            structures["positions"].requires_grad = True
 
         # print("Calculating spherical expansion")
         spherical_expansion = self.spherical_expansion_calculator(structures)
@@ -128,11 +128,25 @@ class Model(torch.nn.Module):
 
         # print("Computing forces by backpropagation")
         if self.do_forces:
-            forces = compute_forces(energies, structures.positions, is_training=is_training)
+            forces = compute_forces(energies, structures["positions"], is_training=is_training)
         else:
             forces = None  # Or zero-dimensional tensor?
 
         return energies, forces
+
+    def predict_epoch(self, data_loader):
+        
+        predicted_energies = []
+        predicted_forces = []
+        for i, batch in enumerate(data_loader):
+            predicted_energies_batch, predicted_forces_batch = model(batch, is_training=False)
+            predicted_energies.append(predicted_energies_batch)
+            predicted_forces.append(predicted_forces_batch)
+
+        predicted_energies = torch.concatenate(predicted_energies, dim=0)
+        predicted_forces = torch.concatenate(predicted_forces, dim=0)
+        return predicted_energies, predicted_forces
+
 
     def train_epoch(self, data_loader, force_weight):
         
@@ -160,26 +174,27 @@ class Model(torch.nn.Module):
         else:
             def closure():
                 optimizer.zero_grad()
-                for train_structures in data_loader:
-                    predicted_energies, predicted_forces = model(train_structures)
-                    energies = torch.tensor([structure.info[target_key] for structure in train_structures], device=device)*energy_conversion_factor
+                total_loss = 0.0
+                for batch in data_loader:
+                    predicted_energies, predicted_forces = model(batch)
+                    energies = torch.tensor([structure.info[target_key] for structure in batch], device=device)*energy_conversion_factor
                     
-                    comp = comp_calculator.compute(train_structures)
+                    comp = comp_calculator.compute(batch)
                     comp = comp.keys_to_properties(center_species_labels)
                     comp = torch.tensor(comp.block().values).to(device)
                     energies -= comp @ c_comp
 
                     loss = get_sse(predicted_energies, energies)
                     if do_forces:
-                        forces = torch.tensor(np.concatenate([structure.get_forces() for structure in train_structures], axis=0))*force_conversion_factor
+                        forces = torch.tensor(np.concatenate([structure.get_forces() for structure in batch], axis=0))*force_conversion_factor
                         forces = forces.to(device)
                         loss += force_weight * get_sse(predicted_forces, forces)
-                loss.backward()
-                print(loss.item())
-                return loss
-            loss = optimizer.step(closure)
-            total_loss = loss.item()
+                    loss.backward()
+                    total_loss += loss.item()
+                print(total_loss)
+                return total_loss
 
+            total_loss = optimizer.step(closure)
         return total_loss
 
     def _apply_layer(self, energies, tmap, layer):
@@ -205,16 +220,19 @@ model = Model(hypers, all_species, do_forces=do_forces).to(device)
 
 if optimizer_name == "Adam":
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3) 
-    batch_size = 16
+    batch_size = 16  # Batch for training speed
 else:
-    optimizer = torch.optim.LBFGS(model.parameters(), lr=0.1)
-    batch_size = n_train
+    optimizer = torch.optim.LBFGS(model.parameters(), line_search_fn="strong_wolfe", history_size=128)
+    batch_size = 128  # Batch for memory
 
-data_loader = torch.utils.data.DataLoader(train_structures, batch_size=batch_size, shuffle=True, collate_fn=(lambda x: x))
+train_data_loader = torch.utils.data.DataLoader(train_structures, batch_size=batch_size, shuffle=True, collate_fn=(lambda x: x))
 
-with torch.autograd.set_detect_anomaly(True):
-    predicted_train_energies, predicted_train_forces = model(train_structures, is_training=False)
-predicted_test_energies, predicted_test_forces = model(test_structures, is_training=False)
+predict_train_data_loader = torch.utils.data.DataLoader(train_structures, batch_size=32, shuffle=False, collate_fn=(lambda x: x))
+predict_test_data_loader = torch.utils.data.DataLoader(test_structures, batch_size=32, shuffle=False, collate_fn=(lambda x: x))
+
+# with torch.autograd.set_detect_anomaly(True):
+predicted_train_energies, predicted_train_forces = model.predict_epoch(predict_train_data_loader)
+predicted_test_energies, predicted_test_forces = model.predict_epoch(predict_test_data_loader)
 train_energies = torch.tensor([structure.info[target_key] for structure in train_structures])*energy_conversion_factor
 train_energies = train_energies.to(device)
 test_energies = torch.tensor([structure.info[target_key] for structure in test_structures])*energy_conversion_factor
@@ -263,17 +281,14 @@ import os
 os.remove('profile')"""
 
 for epoch in range(1000):
-
-    #force_weight = get_rmse(predicted_train_energies, train_energies).item()**2 / get_rmse(predicted_train_forces, train_forces).item()**2
-    #print(force_weight)
     
-    total_loss = model.train_epoch(data_loader, force_weight)
+    _ = model.train_epoch(train_data_loader, force_weight)
 
-    predicted_train_energies, predicted_train_forces = model(train_structures, is_training=False)
-    predicted_test_energies, predicted_test_forces = model(test_structures, is_training=False)
+    predicted_train_energies, predicted_train_forces = model.predict_epoch(predict_train_data_loader)
+    predicted_test_energies, predicted_test_forces = model.predict_epoch(predict_test_data_loader)
 
     print()
-    print(f"Epoch number {epoch}, Total loss: {total_loss}")
+    print(f"Epoch number {epoch}, Total loss: {get_sse(predicted_train_energies, train_energies)+force_weight*get_sse(predicted_train_forces, train_forces)}")
     print(f"Energy errors: Train RMSE: {get_rmse(predicted_train_energies, train_energies)}, Train MAE: {get_mae(predicted_train_energies, train_energies)}, Test RMSE: {get_rmse(predicted_test_energies, test_energies)}, Test MAE: {get_mae(predicted_test_energies, test_energies)}")
     if do_forces:
         print(f"Force errors: Train RMSE: {get_rmse(predicted_train_forces, train_forces)}, Train MAE: {get_mae(predicted_train_forces, train_forces)}, Test RMSE: {get_rmse(predicted_test_forces, test_forces)}, Test MAE: {get_mae(predicted_test_forces, test_forces)}")

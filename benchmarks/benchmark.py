@@ -9,7 +9,7 @@ rascaline._c_lib._get_library()
 from torch_spex.le import Jn_zeros
 from equistore import Labels
 from torch_spex.spherical_expansions import SphericalExpansion
-from torch_spex.structures import Structures
+from torch_spex.structures import ase_atoms_to_tensordict
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Running on {device}")
@@ -29,8 +29,8 @@ hypers_spherical_expansion = {
     }
 }
 calculator = SphericalExpansion(hypers_spherical_expansion, [1, 6, 8], device=device)
-transformed_structures = Structures(structures)
-transformed_structures.to(device)
+transformed_structures = ase_atoms_to_tensordict(structures, device=device)
+transformed_structures
 
 from torch.profiler import profile
 
@@ -44,7 +44,7 @@ print(f"torch_spex took {finish_time-start_time} s")
 all_species = np.unique(spherical_expansion_coefficients_torch_spex.keys["a_i"])
 
 l_max = 0
-for key, block in spherical_expansion_coefficients_torch_spex:
+for key, block in spherical_expansion_coefficients_torch_spex.items():
     l_max = max(l_max, key[1])
 print("l_max is", l_max)
 n_max = spherical_expansion_coefficients_torch_spex.block(0).values.shape[2] // len(all_species)
